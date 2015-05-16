@@ -41,6 +41,14 @@ init({Delta, Nodes}) ->
 handle_call(_Msg, _From, State) ->
     {noreply, State}.
 
+handle_cast({ts, Timestamp, Msg}, State) ->
+    case timer:now_diff(os:timestamp(), Timestamp) > (State#state.delta * 1000) of
+	true ->
+	    % message has expired
+	    {noreply, State};
+	false ->
+	    handle_cast(Msg, State)
+    end;
 
 handle_cast({ok, Round, _From}, State0) when Round == State0#state.round ->
     State1 = restart_timer(State0#state{ok_count = State0#state.ok_count + 1}),
@@ -116,7 +124,7 @@ restart_timer(State) ->
 
 
 send(Msg, Node) ->
-    gen_server:cast({?MODULE, Node}, Msg).
+    gen_server:cast({?MODULE, Node}, {ts, os:timestamp(), Msg}).
 
 
 send_all(Msg, State) ->
