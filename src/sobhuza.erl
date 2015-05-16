@@ -58,7 +58,7 @@ handle_cast({ok, Round, _From}, State0) when Round == State0#state.round ->
 	true ->
 	    State2 = State1#state{round = Round},
 	    Leader = candidate(State2),
-	    error_logger:info_msg("~p is the new leader~n", [Leader]),
+	    error_logger:info_msg("~p is the leader~n", [Leader]),
 	    {noreply, State2#state{leader = Leader}};
 	false ->
 	    {noreply, State1}
