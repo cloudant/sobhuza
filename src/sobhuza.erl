@@ -1,7 +1,7 @@
 -module(sobhuza).
 -behavior(gen_server).
 
--export([start_link/2]).
+-export([start_link/0, start_link/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -record(state, {
@@ -17,6 +17,10 @@
     tick,
     timer
 }).
+
+start_link() ->
+    sobhuza:start_link(500, mem3:nodes()).
+
 
 start_link(Delta, Nodes) when is_integer(Delta), Delta > 10, is_list(Nodes) ->
     case lists:member(node(), Nodes) of
@@ -44,10 +48,11 @@ init({Delta, Nodes}) ->
 handle_call(_Msg, _From, State) ->
     {noreply, State}.
 
-handle_cast({ts, Timestamp, Msg}, State) ->
-    case timer:now_diff(os:timestamp(), Timestamp) > (State#state.delta * 1000) of
+handle_cast({ts, Timestamp, Nodes, Msg}, State) ->
+    case timer:now_diff(os:timestamp(), Timestamp) > (State#state.delta * 1000) orelse
+        State#state.nodes /= Nodes of
 	true ->
-	    % message has expired
+	    % message has expired or cohort is distinct
 	    {noreply, State};
 	false ->
 	    handle_cast(Msg, State)
@@ -61,7 +66,7 @@ handle_cast({ok, Round, _From}, State0) when Round == State0#state.round ->
 	true ->
 	    State2 = State1#state{round = Round},
 	    Leader = candidate(State2),
-	    error_logger:info_msg("~p is the leader~n", [Leader]),
+	    twig:log(notice, "~p is the leader~n", [Leader]),
 	    {noreply, State2#state{leader = Leader}};
 	false ->
 	    {noreply, State1}
@@ -74,29 +79,29 @@ handle_cast({start, Round, _From}, State) when Round > State#state.round ->
     {noreply, start_round(Round, State)};
 
 handle_cast({ok, Round, From}, State) when Round < State#state.round ->
-    send({ok, State#state.round, node()}, From),
+    send({ok, State#state.round, node()}, From, State),
     {noreply, State};
 
 handle_cast({start, Round, From}, State) when Round < State#state.round ->
-    send({ok, State#state.round, node()}, From),
+    send({ok, State#state.round, node()}, From, State),
     {noreply, State};
 
 handle_cast({alert, Round}, State) when Round > State#state.round ->
-    error_logger:info_msg("Leader demoted by alert from round ~B~n", [Round]),
+    twig:log(notice, "Leader demoted by alert from round ~B~n", [Round]),
     {noreply, State#state{last_alert = State#state.tick, leader = undefined}};
 
 handle_cast({ping, Round, From}, State) ->
-    error_logger:info_msg("Received ping from ~p in round ~B~n", [From, Round]),
-    send({pong, Round, node()}, From),
+    twig:log(notice, "Received ping from ~p in round ~B~n", [From, Round]),
+    send({pong, Round, node()}, From, State),
     {noreply, State};
 
 handle_cast({pong, Round, From}, State0) when Round == State0#state.round ->
-    error_logger:info_msg("Received pong from ~p in current round ~B~n", [From, Round]),
+    twig:log(notice, "Received pong from ~p in current round ~B~n", [From, Round]),
     State1 = State0#state{pongs = [From | State0#state.pongs]},
     {noreply, State1};
 
 handle_cast({pong, Round, From}, State) ->
-    error_logger:info_msg("Received pong from ~p in round ~B~n", [From, Round]),
+    twig:log(notice, "Received pong from ~p in round ~B~n", [From, Round]),
     {noreply, State};
 
 handle_cast(_Msg, State) ->
@@ -104,21 +109,26 @@ handle_cast(_Msg, State) ->
 
 
 handle_info(tick, State) ->
+    NewNodes = lists:sort(mem3:nodes()),
+    NodesChanged = State#state.nodes /= NewNodes,
     Pinging = State#state.last_ping /= undefined,
     PingComplete = Pinging andalso (State#state.tick - State#state.last_ping) == 2,
     Timeout = (State#state.tick - State#state.last_restart) > 2,
-    case {Pinging, PingComplete, Timeout} of
-	{true, false, _} ->
+    case {NodesChanged, Pinging, PingComplete, Timeout} of
+        {true, _, _, _} ->
+            {ok, State1} = init({State#state.delta, NewNodes}),
+            {noreply, State1};
+	{false, true, false, _} ->
 	    {noreply, tick(State)};
-	{true, true, _} ->
+	{false, true, true, _} ->
 	    Round = next_round(State),
-	    error_logger:info_msg("Jumping to responsive round ~B~n", [Round]),
+	    twig:log(notice, "Jumping to responsive round ~B~n", [Round]),
 	    {noreply, tick(start_round(Round, State#state{last_ping = undefined}))};
-	{false, false, true} ->
+	{false, false, false, true} ->
 	    send_all({alert, State#state.round + 1}, State),
 	    send_all({ping, State#state.round, node()}, State),
 	    {noreply, tick(State#state{last_ping = State#state.tick})};
-	{false, false, false} ->
+	{false, false, false, false} ->
 	    case candidate(State) of
 		Node when Node == node() ->
 		    send_all({ok, State#state.round, node()}, State);
@@ -161,16 +171,16 @@ restart_timer(State) ->
     State#state{last_restart = State#state.tick}.
 
 
-send(Msg, Node) ->
-    gen_server:cast({?MODULE, Node}, {ts, os:timestamp(), Msg}).
+send(Msg, Node, State) ->
+    gen_server:cast({?MODULE, Node}, {ts, os:timestamp(), State#state.nodes, Msg}).
 
 
 send_all(Msg, State) ->
-    [send(Msg, Node) || Node <- State#state.nodes].
+    [send(Msg, Node, State) || Node <- State#state.nodes].
 
 
 start_round(Round, State0) ->
-    error_logger:info_msg("Starting round ~B~n", [Round]),
+    twig:log(notice, "Starting round ~B~n", [Round]),
     State = restart_timer(State0#state{
         last_ping = undefined,
         leader = undefined,

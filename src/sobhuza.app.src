@@ -1,0 +1,13 @@
+{application, sobhuza,
+ [
+  {description, "Stable leader election"},
+  {vsn, git},
+  {registered, []},
+  {applications, [
+                  kernel,
+                  stdlib,
+                  mem3
+                 ]},
+  {mod, { sobhuza_app, []}},
+  {env, []}
+ ]}.
